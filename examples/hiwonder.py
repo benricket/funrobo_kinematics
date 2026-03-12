@@ -33,11 +33,11 @@ class FiveDOFRobot(FiveDOFRobotTemplate):
 
     def calc_forward_kinematics(self,joint_values: list, radians=True):
         dh_table = np.array([
-            [self.joint_values[0],self.l1, 0, -0.5 * pi],
-            [self.joint_values[1] - 0.5*pi,0,self.l2,pi],
-            [self.joint_values[2],0,self.l3,pi],
-            [self.joint_values[3] + 0.5*pi,0,0,0.5*pi],
-            [self.joint_values[4],self.l4 + self.l5,0,0],
+            [joint_values[0],self.l1, 0, -0.5 * pi],
+            [joint_values[1] - 0.5*pi,0,self.l2,pi],
+            [joint_values[2],0,self.l3,pi],
+            [joint_values[3] + 0.5*pi,0,0,0.5*pi],
+            [joint_values[4],self.l4 + self.l5,0,0],
         ])
 
         H_ee, H_list = self.dh_to_H(dh_table=dh_table)
@@ -98,11 +98,12 @@ class FiveDOFRobot(FiveDOFRobotTemplate):
         """
         Calculates analytical inverse kinematics for the joint
         """
-        return [1,1,1,1,1]
         # We have 4 solutions
-        for soln in range(4):
-            opt1 = (soln >> 1) & 1
-            opt2 = soln & 1
+        sols = []
+        errors = []
+        for solution in range(4):
+            opt1 = (solution >> 1) & 1
+            opt2 = solution & 1
 
             R_0_ee = ut.euler_to_rotm((ee.rotx,ee.roty,ee.rotz))
             p_ee = np.array([ee.x,ee.y,ee.z])
@@ -122,8 +123,8 @@ class FiveDOFRobot(FiveDOFRobotTemplate):
             L = np.linalg.norm(p_wrist_transformed)
             X = np.sqrt(p_wrist_transformed[0]**2 + p_wrist_transformed[1]**2)
             cosB = (-L**2 + self.l2**2 + self.l3**2)/(2*self.l2*self.l3)
-            #print(f"cos b is {cosB}")
-            #cosB = np.clip(cosB, -1.0, 1.0)
+            
+            cosB = np.clip(cosB, -1.0, 1.0)
             beta = np.acos(cosB)
 
             if opt1:
@@ -136,7 +137,7 @@ class FiveDOFRobot(FiveDOFRobotTemplate):
         
             alpha = np.atan2(self.l3 * np.sin(theta3),self.l2 + self.l3 * np.cos(theta3))
             gam = np.atan2(p_wrist_transformed[2],X)
-            theta2 = ut.wraptopi(gam - alpha)
+            theta2 = ut.wraptopi(-(gam - alpha - pi/2))
             
             #print(f"Thetas 1,2,3: {theta1}, {theta2}, {theta3}")
 
@@ -158,21 +159,31 @@ class FiveDOFRobot(FiveDOFRobotTemplate):
 
             ee_pose,_ = self.calc_forward_kinematics([theta1,theta2,theta3,theta4,theta5])
             ee_pose_diff = np.array([ee.x - ee_pose.x, ee.y - ee_pose.y, ee.z - ee_pose.z, ee.rotx - ee_pose.rotx, ee.roty - ee_pose.roty, ee.rotz - ee_pose.rotz])
-            print(f"Error for sol {soln}: {np.linalg.norm(ee_pose_diff)}")
-            print(f"Returned angles: {[theta1,theta2,theta3,theta4,theta5]}\n")
+            #print(f"Error for sol {soln}: {np.linalg.norm(ee_pose_diff)}")
+            #print(f"Returned angles: {[theta1,theta2,theta3,theta4,theta5]}\n")
+            sols.append([theta1,theta2,theta3,theta4,theta5])
+            errors.append(np.linalg.norm(ee_pose_diff))
+        
+        print(f"Error list: {errors}")
+        print(f"Solutions: {sols}")
+        sols_ordered = [s for s, _ in sorted(zip(sols, errors), key=lambda x: x[1])]
 
-        return [theta1,theta2,theta3,theta4,theta5]
+        return sols_ordered[soln]
 
-    def calc_numerical_ik(self, ee, joint_values, tol=0.01, ilimit=100):
+    def calc_numerical_ik(self, ee, joint_values, tol=0.002, ilimit=1000):
         # Numerical IK
         n = ilimit
         eps = tol
-        attempts = 100
+        attempts = 1000
 
         p_des = np.array([ee.x,ee.y,ee.z])
         for j in range(attempts):
-            # Random guess
-            curr_joint_vals = ut.sample_valid_joints(self)
+            if j == 0:
+                # Start with our current joint values
+                curr_joint_vals = joint_values
+            else:
+                # After that, do a random guess
+                curr_joint_vals = ut.sample_valid_joints(self)
             for i in range(n):
                 print(f"Curr joint vals: {curr_joint_vals}")
                 p_ee, _ = self.calc_forward_kinematics(curr_joint_vals)
@@ -184,13 +195,14 @@ class FiveDOFRobot(FiveDOFRobotTemplate):
                     return curr_joint_vals
                 
                 J = self.calc_jacobians(curr_joint_vals)
-                # We only care about the 2x2 Jacobian (2 joints, 2 pose parameters we control)
                 J = J[0:3,0:5]
+                
                 # Damped inverse
-                lam = 0.000
+                lam = 0.001
                 JJt = J @ J.T
                 JJt = JJt + (lam**2 * np.eye(3))
                 J_inv = J.T @ np.linalg.pinv(JJt)
+                #J_inv = np.linalg.pinv(J)
                 #print(f"jinv shape {J_inv.shape}, err shape {err.shape}")
                 step = J_inv @ err
                 print(f"err {err}, step {step}")

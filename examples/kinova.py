@@ -31,14 +31,15 @@ class KinovaRobot(KinovaRobotTemplate):
         return H_ee, H_list
 
     def calc_forward_kinematics(self,joint_values: list, radians=True):
+        print(f"len joint values: {len(joint_values)}")
         dh_table = np.array([
-            [0,self.l1,0,pi],
-            [self.joint_values[0],-self.l2, 0, 0.5*pi],
-            [self.joint_values[1] + 0.5*pi, 0, -self.l3,pi],
-            [self.joint_values[2] + 0.5*pi, 0, 0, 0.5*pi],
-            [self.joint_values[3], -self.l4 - self.l5, 0, -0.5*pi],
-            [self.joint_values[4], 0, 0, 0.5*pi],
-            [self.joint_values[5], -self.l6 - self.l7, 0, pi]
+            [0,0,0,pi],
+            [joint_values[0],-self.l2-self.l1, 0, 0.5*pi],
+            [joint_values[1] - 0.5*pi, 0, self.l3,pi],
+            [joint_values[2] - 0.5*pi, 0, 0, 0.5*pi],
+            [joint_values[3], -self.l4 - self.l5, 0, -0.5*pi],
+            [joint_values[4], 0, 0, 0.5*pi],
+            [joint_values[5], -self.l6 - self.l7, 0, pi]
         ])
 
         H_ee, H_list = self.dh_to_H(dh_table=dh_table)
@@ -55,89 +56,90 @@ class KinovaRobot(KinovaRobotTemplate):
         """
         Calculates analytical inverse kinematics for the joint
         """
-        # We have 3 choices for solutions
-        opt1  = (soln >> 2) & 1
-        opt2 = (soln >> 1) & 1
-        opt3 = soln & 1
+        # We have 8 solutions
+        sols = []
+        errors = []
+        for solution in range(4):
+            opt1 = (solution >> 1) & 1
+            opt2 = solution & 1
 
-        R_0_ee = ut.euler_to_rotm((ee.rotx,ee.roty,ee.rotz))
-        p_ee = np.array([ee.x,ee.y,ee.z])
-        z_ee = R_0_ee @ np.array([0,0,1]) # Z axis of end effector
-        p_wrist = p_ee - (self.l6 + self.l7)*z_ee # Bend in wrist position
-        print(f"p_ee: {p_ee}, p_wrist: {p_wrist}")
+            R_0_ee = ut.euler_to_rotm((ee.rotx,ee.roty,ee.rotz))
+            p_ee = np.array([ee.x,ee.y,ee.z])
+            z_ee = R_0_ee @ np.array([0,0,1]) # Z axis of end effector
+            p_wrist = p_ee - (self.l6 + self.l7)*z_ee # Bend in wrist position
+            #print(f"p_ee: {p_ee}, p_wrist: {p_wrist}")
 
-        # The joints before the wrist consist only of the two DOF arm on a pivot
-        if opt3:
-            theta1 = np.atan2(p_wrist[1],p_wrist[0])
-        else:
-            theta1 = np.atan2(p_wrist[1],p_wrist[0]) + pi
-        #print(f"theta1: {theta1}") # theta 1 seems good
+            # The joints before the wrist consist only of the two DOF arm on a pivot
+            if opt2:
+                theta1 = np.atan2(p_wrist[1],p_wrist[0])
+            else:
+                theta1 = np.atan2(p_wrist[1],p_wrist[0]) + pi
+            theta1 = ut.wraptopi(theta1)
 
-        # # Undoes rotation of initial joint
-        initial_rotation = np.array([[cos(theta1),-sin(theta1),0],
-                                    [sin(theta1),cos(theta1),0],
-                                    [0,0,1]])
+            # Shift p_wrist to correspond to translation from joint 1
+            p_wrist_transformed = p_wrist - np.array([0,0,self.l1+self.l2])
+            L = np.linalg.norm(p_wrist_transformed)
+            X = np.sqrt(p_wrist_transformed[0]**2 + p_wrist_transformed[1]**2)
+            cosB = (-L**2 + self.l3**2 + (self.l4+self.l5)**2)/(2*self.l3*(self.l4+self.l5))
+            
+            cosB = np.clip(cosB, -1.0, 1.0)
+            beta = np.acos(cosB)
+
+            if opt1:
+                theta3 = pi - beta
+            else:
+                theta3 = beta - pi
+            theta3 = ut.wraptopi(theta3)
+            
+            #print(f"p wrist transformed: {p_wrist_transformed}")
         
-        # Rotate p_wrist so it's in the XZ plane (undoing theta1 rotation)
-        p_wrist_transformed = initial_rotation.T @ p_wrist
+            alpha = np.atan2((self.l4 + self.l5) * np.sin(theta3),self.l3 + (self.l4 + self.l5) * np.cos(theta3))
+            gam = np.atan2(p_wrist_transformed[2],X)
+            theta2 = ut.wraptopi(-(gam - alpha - pi/2))
+            
+            #print(f"Thetas 1,2,3: {theta1}, {theta2}, {theta3}")
 
-        # Shift p_wrist to correspond to translation from joint 1
-        p_wrist_transformed[2] = p_wrist_transformed[2] - (self.l1 + self.l2)
-        cosB = (-p_wrist_transformed[0]**2 - p_wrist_transformed[2]**2 + self.l3**2 + (self.l4+self.l5)**2)/(2*self.l3*(self.l4+self.l5))
-        #print(f"cos b is {cosB}")
-        #cosB = np.clip(cosB, -1.0, 1.0)
-        beta = np.acos(cosB)
+            # Get the orientation of the 3rd frame (wrist) w.r.t. base frame
+            dh_table_partial = np.array([
+                [0,0,0,pi],
+                [theta1,-self.l2-self.l1, 0, 0.5*pi],
+                [theta2 - 0.5*pi, 0, self.l3,pi],
+                [theta3 - 0.5*pi, 0, 0, 0.5*pi]
+            ])
 
-        if opt2:
-            theta3 = pi - beta
-        else:
-            theta3 = beta - pi
+            H_0_3,_ = self.dh_to_H(dh_table_partial)
+            R_0_3 = H_0_3[0:3,0:3]
+
+            # We want rotation of EE w.r.t. frame 3 (before wrist)
+            R_3_ee = R_0_3.T @ R_0_ee
+            
+            if opt1:
+                theta5 = ut.wraptopi(np.acos(-R_3_ee[2,2]))
+                theta4 = ut.wraptopi(np.atan2(R_3_ee[1,2],R_3_ee[0,2]))
+                theta6 = ut.wraptopi(np.atan2(R_3_ee[2,1],R_3_ee[2,0]))
+            else:
+                theta5 = ut.wraptopi(-np.acos(-R_3_ee[2,2]))
+                theta4 = ut.wraptopi(np.atan2(-R_3_ee[1,2],-R_3_ee[0,2]))
+                theta6 = ut.wraptopi(np.atan2(-R_3_ee[2,1],-R_3_ee[2,0]))
+
+            ee_pose,_ = self.calc_forward_kinematics([theta1,theta2,theta3,theta4,theta5,theta6])
+            ee_pose_diff = np.array([ee.x - ee_pose.x, ee.y - ee_pose.y, ee.z - ee_pose.z, ee.rotx - ee_pose.rotx, ee.roty - ee_pose.roty, ee.rotz - ee_pose.rotz])
+            #print(f"Error for sol {soln}: {np.linalg.norm(ee_pose_diff)}")
+            #print(f"Returned angles: {[theta1,theta2,theta3,theta4,theta5]}\n")
+            sols.append([theta1,theta2,theta3,theta4,theta5,theta6])
+            errors.append(np.linalg.norm(ee_pose_diff))
         
-        #print(f"p wrist transformed: {p_wrist_transformed}")
+        print(f"Error list: {errors}")
+        print(f"Solutions: {sols}")
+        sols_ordered = [s for s, _ in sorted(zip(sols, errors), key=lambda x: x[1])]    
+        return sols_ordered[soln]
         
-        #alpha = np.atan2((self.l4+self.l5)*sin(beta),self.l3 + (self.l4+self.l5)*cos(beta))
-        alpha = np.asin(((self.l4 + self.l5) * np.sin(beta))/((p_wrist_transformed[0]**2 + p_wrist_transformed[2]**2))**0.5)
-        gam = np.atan2(p_wrist_transformed[2],p_wrist_transformed[0])
 
-        if opt2:
-            theta2 = gam - alpha
-        else:
-            theta2 = gam + alpha
-        
-        print(f"Thetas 1,2,3: {theta1}, {theta2}, {theta3}")
-
-        # Get the orientation of the 3rd frame (wrist) w.r.t. base frame
-        dh_table_partial = np.array([
-            [0,0,0,pi],
-            [theta1,-self.l2-self.l1, 0, 0.5*pi],
-            [theta2 + 0.5*pi, 0, -self.l3,pi],
-            [theta3 + 0.5*pi, 0, 0, 0.5*pi]
-        ])
-
-        H_0_3,_ = self.dh_to_H(dh_table_partial)
-        R_0_3 = H_0_3[0:3,0:3]
-
-        # We want rotation of EE w.r.t. frame 3 (before wrist)
-        R_3_ee = R_0_3.T @ R_0_ee
-        
-        if opt1:
-            theta5 = np.acos(-R_3_ee[2,2])
-            theta4 = np.atan2(R_3_ee[1,2],R_3_ee[0,2])
-            theta6 = np.atan2(R_3_ee[2,1],R_3_ee[2,0])
-        else:
-            theta5 = -np.acos(-R_3_ee[2,2])
-            theta4 = np.atan2(-R_3_ee[1,2],-R_3_ee[0,2])
-            theta6 = np.atan2(-R_3_ee[2,1],-R_3_ee[2,0])
-
-        print(f"Returned angles: {[theta1,theta2,theta3,theta4,theta5,theta6]}")
-        return [theta1,theta2,theta3,theta4,theta5,theta6]
-    
-
-    def calc_numerical_ik(self, ee, joint_values, tol=0.0001, ilimit=100):
+    def calc_numerical_ik(self, ee, joint_values, tol=0.002, ilimit=1000):
         # Numerical IK
         n = ilimit
         eps = tol
-        attempts = 10
+        attempts = 1000
 
         p_des = np.array([ee.x,ee.y,ee.z,ee.rotx,ee.roty,ee.rotz])
         for j in range(attempts):
@@ -154,8 +156,7 @@ class KinovaRobot(KinovaRobotTemplate):
                     return curr_joint_vals
                 
                 J = self.calc_jacobians(curr_joint_vals)
-                # We only care about the 2x2 Jacobian (2 joints, 2 pose parameters we control)
-                J = J[0:6,0:6]
+                J = J[0:3,0:6]
                 # Damped inverse
                 lam = 0.000
                 JJt = J @ J.T
