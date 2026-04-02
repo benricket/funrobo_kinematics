@@ -8,6 +8,8 @@
 
 This branch is specifically for the **Path and trajectory planning** modules.
 
+In this fork, I (Ben) implemented Quintic and Trapezoidal trajectory planning by building off of the existing Cubic polynomial.
+
 ## Viz Tool - Mainly for Path & Trajectory Planning
 
 <img src = "media/path-planning.png">
